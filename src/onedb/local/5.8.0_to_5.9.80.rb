@@ -1,5 +1,3 @@
-#!/usr/bin/ruby
-
 # -------------------------------------------------------------------------- #
 # Copyright 2002-2019, OpenNebula Project, OpenNebula Systems                #
 #                                                                            #
@@ -16,32 +14,54 @@
 # limitations under the License.                                             #
 #--------------------------------------------------------------------------- #
 
-$LOAD_PATH.unshift File.dirname(__FILE__)
+require 'set'
+require 'base64'
+require 'zlib'
+require 'pathname'
+require 'yaml'
+require 'opennebula'
+require 'vcenter_driver'
 
-require 'container'
+$LOAD_PATH << File.dirname(__FILE__)
 
-require_relative '../../scripts_common'
+include OpenNebula
 
-# ------------------------------------------------------------------------------
-# Action Arguments, STDIN includes XML description of the OpenNebula VM
-# ------------------------------------------------------------------------------
-vm_name = ARGV[0]
-vm_id   = ARGV[2]
+module Migrator
 
-xml = STDIN.read
+    def db_version
+        '5.9.80'
+    end
 
-client    = LXDClient.new
-container = Container.get(vm_name, xml, client)
+    def one_version
+        'OpenNebula 5.9.80'
+    end
 
-# ------------------------------------------------------------------------------
-# Stop vnc connection and container & unmap devices if not a wild container
-# ------------------------------------------------------------------------------
-container.vnc('stop')
-container.check_stop
+    def up
+        feature_2722
+        true
+    end
 
-exit 0 if container.wild?
+    private
 
-raise 'Failed to dismantle container storage' unless \
-container.setup_storage('unmap')
+    def feature_2722
+        @db.run 'DROP TABLE IF EXISTS old_logdb;'
+        @db.run 'ALTER TABLE logdb RENAME TO old_logdb;'
 
-container.delete
+        create_table(:logdb)
+
+        @db.run 'INSERT INTO system_attributes (name, body)' <<
+                'SELECT \'RAFT_STATE\', sqlcmd FROM old_logdb WHERE log_index = -1;'
+
+        @db.run 'DELETE FROM old_logdb WHERE log_index = -1;'
+
+        db.transaction do
+            # update virtual networks
+            @db.fetch('SELECT * FROM old_logdb') do |row|
+                row[:fed_index] = 18446744073709551615 if row[:fed_index] < 0
+
+                @db[:logdb].insert(row)
+            end
+        end
+    end
+
+end
